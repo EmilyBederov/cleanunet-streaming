@@ -1,0 +1,65 @@
+{
+  "train_config": {
+    "exp_path": "hearing_aid_cleanunet",
+    "log": {
+      "directory": "./logs",
+      "ckpt_iter": "max",
+      "iters_per_ckpt": 1000,
+      "iters_per_valid": 100
+    },
+    "optimization": {
+      "n_iters": 50000,
+      "learning_rate": 0.0001,
+      "batch_size_per_gpu": 8
+    },
+    "loss_config": {
+      "stft_lambda": 1.0,
+      "l1_lambda": 1.0,
+      "stft_config": {
+        "fft_sizes": [
+          256,
+          512,
+          1024
+        ],
+        "hop_sizes": [
+          32,
+          64,
+          128
+        ],
+        "win_lengths": [
+          160,
+          320,
+          640
+        ],
+        "window": "hann_window",
+        "sc_lambda": 1.0,
+        "mag_lambda": 1.0,
+        "band": "full"
+      }
+    }
+  },
+  "network_config": {
+    "channels_input": 1,
+    "channels_output": 1,
+    "channels_H": 32,
+    "max_H": 256,
+    "encoder_n_layers": 6,
+    "kernel_size": 3,
+    "stride": 2,
+    "tsfm_n_layers": 2,
+    "tsfm_n_head": 4,
+    "tsfm_d_model": 256,
+    "tsfm_d_inner": 512,
+    "use_group_norm": true
+  },
+  "trainset_config": {
+    "train_dir": "./data/train",
+    "test_dir": "./data/test",
+    "crop_length_sec": 1.0,
+    "sample_rate": 16000
+  },
+  "dist_config": {
+    "dist_backend": "nccl",
+    "dist_url": "tcp://localhost:54321"
+  }
+}
