@@ -376,17 +376,16 @@ class CausalCleanUNet(nn.Module):
             
             print(f"Decoder {i}: x.shape={x.shape}, skip_i.shape={skip_i.shape}")
             
-            # Fix length
+            # Fix length mismatch - trim skip to match current x length
             target_length = x.shape[-1]
-            if skip_i.shape[-1] != target_length:
+            if skip_i.shape[-1] > target_length:
                 skip_i = skip_i[..., :target_length]
+            elif skip_i.shape[-1] < target_length:
+                # If skip is shorter, trim x to match skip (more conservative for causality)
+                x = x[..., :skip_i.shape[-1]]
             
-            # Only add if channels match
-            if skip_i.shape[1] == x.shape[1]:
-                x = x + skip_i
-            else:
-                print(f"Skipping connection {i} due to channel mismatch")
-            
+            # Add skip connection (channels should match now)
+            x = x + skip_i
             x = decoder_block(x)
 
 
