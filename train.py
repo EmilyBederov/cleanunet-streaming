@@ -302,26 +302,9 @@ if __name__ == "__main__":
                         help='Create default hearing aid config and exit')
     args = parser.parse_args()
 
-    # Create default config if requested
-    if args.create_config:
-        
-        config = "configs/hearing_aid.json"
-        os.makedirs("configs", exist_ok=True)
-        with open(config, 'w') as f:
-            json.dump(config, f, indent=2)
-        print(f"Default hearing aid config created at {config}")
-        print("Edit this config file and then run:")
-        print(f"python {__file__} -c {config}")
-        exit(0)
-
-    # # Parse configs
-    # if args.config is None:
-    #     print("No config file provided. Creating default config...")
-    #     config = "configs/hearing_aid_cleanunet.json"
-    # else:
-    #     with open(args.config) as f:
-    #         data = f.read()
-    #     config = json.loads(data)
+    with open(args.config) as f:
+        data = f.read()
+    config = json.loads(data)
 
     # Extract configuration sections
     train_config = config["train_config"]
