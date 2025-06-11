@@ -16,21 +16,9 @@
       "stft_lambda": 1.0,
       "l1_lambda": 1.0,
       "stft_config": {
-        "fft_sizes": [
-          256,
-          512,
-          1024
-        ],
-        "hop_sizes": [
-          32,
-          64,
-          128
-        ],
-        "win_lengths": [
-          160,
-          320,
-          640
-        ],
+        "fft_sizes": [256, 512, 1024],
+        "hop_sizes": [32, 64, 128],
+        "win_lengths": [160, 320, 640],
         "window": "hann_window",
         "sc_lambda": 1.0,
         "mag_lambda": 1.0,
@@ -53,8 +41,12 @@
     "use_group_norm": true
   },
   "trainset_config": {
-    "train_dir": "./voicebank_dns_format/training_set",
-    "test_dir": "./voicebank_dns_format/testing_set",
+    "root": "./voicebank_dns_format",
+    "crop_length_sec": 1.0,
+    "sample_rate": 16000
+  },
+  "testset_config": {
+    "root": "./voicebank_dns_format", 
     "crop_length_sec": 1.0,
     "sample_rate": 16000
   },
