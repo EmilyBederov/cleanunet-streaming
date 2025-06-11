@@ -303,11 +303,13 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Check if config file exists
-    if args.config is None or not os.path.exists(args.config):
+    if args.config is None:
+        args.config = 'configs/hearing_aid.json'  # Set default here
+    
+    if not os.path.exists(args.config):
         print(f"Config file not found: {args.config}")
-        print("Please check the path or create the config file")
         exit(1)
-        
+
     with open(args.config) as f:
         data = f.read()
     config = json.loads(data)
