@@ -305,7 +305,7 @@ if __name__ == "__main__":
     # Create default config if requested
     if args.create_config:
         
-        config = "configs/hearing_aid_cleanunet.json"
+        config = "configs/hearing_aid.json"
         os.makedirs("configs", exist_ok=True)
         with open(config, 'w') as f:
             json.dump(config, f, indent=2)
@@ -314,14 +314,14 @@ if __name__ == "__main__":
         print(f"python {__file__} -c {config}")
         exit(0)
 
-    # Parse configs
-    if args.config is None:
-        print("No config file provided. Creating default config...")
-        config = "configs/hearing_aid_cleanunet.json"
-    else:
-        with open(args.config) as f:
-            data = f.read()
-        config = json.loads(data)
+    # # Parse configs
+    # if args.config is None:
+    #     print("No config file provided. Creating default config...")
+    #     config = "configs/hearing_aid_cleanunet.json"
+    # else:
+    #     with open(args.config) as f:
+    #         data = f.read()
+    #     config = json.loads(data)
 
     # Extract configuration sections
     train_config = config["train_config"]
