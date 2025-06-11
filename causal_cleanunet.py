@@ -374,15 +374,19 @@ class CausalCleanUNet(nn.Module):
         for i, decoder_block in enumerate(self.decoder):
             skip_i = skip_connections[i]
             
-            target_length = x.shape[-1]
-            if skip_i.shape[-1] > target_length:
-                skip_i = skip_i[..., :target_length]  # Trim from end
-            elif skip_i.shape[-1] < target_length:
-                padding = target_length - skip_i.shape[-1]
-                skip_i = F.pad(skip_i, (0, padding))
+            print(f"Decoder {i}: x.shape={x.shape}, skip_i.shape={skip_i.shape}")
             
-            # Add skip connection
-            x = x + skip_i
+            # Fix length
+            target_length = x.shape[-1]
+            if skip_i.shape[-1] != target_length:
+                skip_i = skip_i[..., :target_length]
+            
+            # Only add if channels match
+            if skip_i.shape[1] == x.shape[1]:
+                x = x + skip_i
+            else:
+                print(f"Skipping connection {i} due to channel mismatch")
+            
             x = decoder_block(x)
 
 
