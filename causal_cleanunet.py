@@ -374,19 +374,16 @@ class CausalCleanUNet(nn.Module):
         for i, decoder_block in enumerate(self.decoder):
             skip_i = skip_connections[i]
             
-            # Trim skip connection to match current x length
             target_length = x.shape[-1]
-            skip_i = trim_to_match_length(skip_i, target_length)
+            if skip_i.shape[-1] > target_length:
+                skip_i = skip_i[..., :target_length]  # Trim from end
+            elif skip_i.shape[-1] < target_length:
+                padding = target_length - skip_i.shape[-1]
+                skip_i = F.pad(skip_i, (0, padding))
             
             # Add skip connection
             x = x + skip_i
             x = decoder_block(x)
-
-        # Final trimming to original length and denormalization
-        x = trim_to_match_length(x, original_length)
-        x = x * std
-        
-        return x
 
 
 # Example usage and configuration for hearing aids
