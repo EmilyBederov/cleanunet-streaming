@@ -376,17 +376,20 @@ class CausalCleanUNet(nn.Module):
             
             print(f"Decoder {i}: x.shape={x.shape}, skip_i.shape={skip_i.shape}")
             
-            # Fix length mismatch - trim skip to match current x length
-            target_length = x.shape[-1]
-            if skip_i.shape[-1] > target_length:
-                skip_i = skip_i[..., :target_length]
-            elif skip_i.shape[-1] < target_length:
-                # If skip is shorter, trim x to match skip (more conservative for causality)
-                x = x[..., :skip_i.shape[-1]]
-            
-            # Add skip connection (channels should match now)
-            x = x + skip_i
-            x = decoder_block(x)
+            # Handle both channel and length mismatches
+            if skip_i.shape[1] != x.shape[1]:
+                # Channel mismatch - skip the addition
+                print(f"  Skipping connection {i} due to channel mismatch ({skip_i.shape[1]} vs {x.shape[1]})")
+                x = decoder_block(x)
+            else:
+                # Channels match - fix length then add
+                min_length = min(x.shape[-1], skip_i.shape[-1])
+                x_trimmed = x[..., :min_length]
+                skip_trimmed = skip_i[..., :min_length]
+                
+                print(f"  Adding connection {i} after trimming to length {min_length}")
+                x = x_trimmed + skip_trimmed
+                x = decoder_block(x)
 
 
 # Example usage and configuration for hearing aids
