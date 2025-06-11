@@ -53,8 +53,8 @@
     "use_group_norm": true
   },
   "trainset_config": {
-    "train_dir": "./data/train",
-    "test_dir": "./data/test",
+    "train_dir": "./voicebank_dns_format/training_set",
+    "test_dir": "./voicebank_dns_format/testing_set",
     "crop_length_sec": 1.0,
     "sample_rate": 16000
   },
