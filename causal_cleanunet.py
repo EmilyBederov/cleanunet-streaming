@@ -386,32 +386,34 @@ class CausalCleanUNet(nn.Module):
         x = x.permute(0, 2, 1)  # (B, L, C) -> (B, C, L)
         x = self.tsfm_conv2(x)
 
-        # Decoder with robust skip connection handling
+        # Decoder with simplified skip connection handling
         for i, decoder_block in enumerate(self.decoder):
+            print(f"Decoder {i}: x.shape={x.shape}")
+            
+            # Apply decoder block first
+            x = decoder_block(x)
+            print(f"  After decoder block: x.shape={x.shape}")
+            
+            # Then add skip connection if possible
             if i < len(skip_connections):
                 skip_i = skip_connections[i]
                 
-                # Handle both channel and length mismatches
-                if skip_i.shape[1] != x.shape[1]:
-                    # Channel mismatch - skip the addition
-                    x = decoder_block(x)
-                else:
-                    # Channels match - fix length then add
-                    min_length = min(x.shape[-1], skip_i.shape[-1])
-                    x_trimmed = x[..., :min_length]
-                    skip_trimmed = skip_i[..., :min_length]
+                if (skip_i.shape[1] == x.shape[1] and 
+                    skip_i.shape[-1] <= x.shape[-1]):
                     
-                    # Add skip connection
-                    x = x_trimmed + skip_trimmed
-                    x = decoder_block(x)
-            else:
-                # No skip connection available
-                x = decoder_block(x)
+                    # Trim to match and add
+                    min_length = min(x.shape[-1], skip_i.shape[-1])
+                    x = x[..., :min_length] + skip_i[..., :min_length]
+                    print(f"  Added skip connection: final shape={x.shape}")
 
-        # Final trimming to original length and denormalization
-        x = trim_to_match_length(x, original_length)
+        # Ensure we have a valid tensor
+        print(f"Final x.shape before processing: {x.shape}")
+        
+        # Final processing
+        x = trim_to_match_length(x, original_length) 
         x = x * std
         
+        print(f"Returning: {x.shape}")
         return x
 
 
