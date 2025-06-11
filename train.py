@@ -290,73 +290,6 @@ def train_hearing_aid(num_gpus, rank, group_name,
     return 0
 
 
-def create_hearing_aid_config():
-    """Create configuration for hearing aid training"""
-    return {
-        "train_config": {
-            "exp_path": "hearing_aid_cleanunet",
-            "log": {
-                "directory": "./logs",
-                "ckpt_iter": "max",
-                "iters_per_ckpt": 2000,
-                "iters_per_valid": 200
-            },
-            "optimization": {
-                "n_iters": 100000,
-                "learning_rate": 1e-4,
-                "weight_decay": 1e-4,
-                "batch_size_per_gpu": 8
-            },
-            "loss_config": {
-                "l1_lambda": 1.0,
-                "stft_lambda": 1.0,
-                "perceptual_lambda": 0.1,
-                "stft_config": {
-                    "fft_sizes": [256, 512, 1024],
-                    "hop_sizes": [32, 64, 128],
-                    "win_lengths": [160, 320, 640],
-                    "window": "hann_window",
-                    "sc_lambda": 1.0,
-                    "mag_lambda": 1.0,
-                    "band": "full"
-                }
-            }
-        },
-        
-        "network_config": {
-            "channels_input": 1,
-            "channels_output": 1,
-            "channels_H": 32,
-            "max_H": 256,
-            "encoder_n_layers": 6,
-            "kernel_size": 3,
-            "stride": 2,
-            "tsfm_n_layers": 2,
-            "tsfm_n_head": 4,
-            "tsfm_d_model": 256,
-            "tsfm_d_inner": 512,
-            "use_group_norm": True
-        },
-        
-        "trainset_config": {
-            "train_dir": "./data/train",
-            "crop_length_sec": 2.0,
-            "sample_rate": 16000
-        },
-        
-        "testset_config": {
-            "test_dir": "./data/test",
-            "crop_length_sec": 2.0,
-            "sample_rate": 16000
-        },
-        
-        "dist_config": {
-            "dist_backend": "nccl",
-            "dist_url": "tcp://localhost:54321"
-        }
-    }
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('-c', '--config', type=str, default=None, 
@@ -371,20 +304,20 @@ if __name__ == "__main__":
 
     # Create default config if requested
     if args.create_config:
-        config = create_hearing_aid_config()
-        config_path = "configs/hearing_aid_cleanunet.json"
+        
+        config = "configs/hearing_aid_cleanunet.json"
         os.makedirs("configs", exist_ok=True)
-        with open(config_path, 'w') as f:
+        with open(config, 'w') as f:
             json.dump(config, f, indent=2)
-        print(f"Default hearing aid config created at {config_path}")
+        print(f"Default hearing aid config created at {config}")
         print("Edit this config file and then run:")
-        print(f"python {__file__} -c {config_path}")
+        print(f"python {__file__} -c {config}")
         exit(0)
 
     # Parse configs
     if args.config is None:
         print("No config file provided. Creating default config...")
-        config = create_hearing_aid_config()
+        config = "configs/hearing_aid_cleanunet.json"
     else:
         with open(args.config) as f:
             data = f.read()
