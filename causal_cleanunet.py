@@ -1,5 +1,5 @@
 # Copyright (c) 2022 NVIDIA CORPORATION. 
-# Licensed under the MIT license.
+#   Licensed under the MIT license.
 # Modified for hearing aid applications with causal processing
 
 import numpy as np
@@ -244,12 +244,12 @@ class CausalCleanUNet(nn.Module):
     """ Causal CleanUNet for real-time hearing aid applications """
 
     def __init__(self, channels_input=1, channels_output=1,
-                 channels_H=32, max_H=256,
-                 encoder_n_layers=6, kernel_size=3, stride=2,
-                 tsfm_n_layers=2, 
-                 tsfm_n_head=4,
-                 tsfm_d_model=256, 
-                 tsfm_d_inner=512,
+                 channels_H=64, max_H=768,
+                 encoder_n_layers=8, kernel_size=4, stride=2,
+                 tsfm_n_layers=3, 
+                 tsfm_n_head=8,
+                 tsfm_d_model=512, 
+                 tsfm_d_inner=2048,
                  use_group_norm=True):
         
         super(CausalCleanUNet, self).__init__()
@@ -263,75 +263,48 @@ class CausalCleanUNet(nn.Module):
         self.stride = stride
         self.use_group_norm = use_group_norm
 
-        # Store channel dimensions for skip connections and decoder inputs
-        self.encoder_channels = []
-        self.decoder_channels = []
-        self.skip_projections = nn.ModuleList()
+        self.tsfm_n_layers = tsfm_n_layers
+        self.tsfm_n_head = tsfm_n_head
+        self.tsfm_d_model = tsfm_d_model
+        self.tsfm_d_inner = tsfm_d_inner
 
         # Encoder and decoder
         self.encoder = nn.ModuleList()
         self.decoder = nn.ModuleList()
 
+        # Build encoder and track channel progression
+        channels_progression = []  # To track encoder output channels
         current_channels = channels_input
-        channels_H_temp = channels_H  # Temporary for encoder loop
         
         for i in range(encoder_n_layers):
-            self.encoder_channels.append(channels_H_temp)
-            
             # Use causal convolutions
             encoder_block = nn.Sequential(
-                CausalConv1d(current_channels, channels_H_temp, kernel_size, stride),
+                CausalConv1d(current_channels, channels_H, kernel_size, stride),
                 nn.ReLU(),
-                nn.Conv1d(channels_H_temp, channels_H_temp * 2, 1), 
+                nn.Conv1d(channels_H, channels_H * 2, 1), 
                 nn.GLU(dim=1)
             )
             self.encoder.append(encoder_block)
             
+            # Track the output channels after GLU (which halves the channels)
+            channels_progression.append(channels_H)  # GLU outputs channels_H
+            
             # Add GroupNorm if requested
-            if use_group_norm:
-                self.encoder.append(nn.GroupNorm(num_groups=min(8, channels_H_temp), 
-                                               num_channels=channels_H_temp))
+            if use_group_norm and i < encoder_n_layers - 1:  # No norm on last layer before transformer
+                norm_layer = nn.GroupNorm(num_groups=min(8, channels_H), num_channels=channels_H)
+                self.encoder.append(norm_layer)
             
-            current_channels = channels_H_temp
-            channels_H_temp *= 2
-            channels_H_temp = min(channels_H_temp, max_H)
-        
-        # Decoder blocks (build in reverse order)
-        channels_H_temp = channels_H  # Reset for decoder
-        current_channels = max_H  # Start from bottleneck
-        for i in range(encoder_n_layers):
-            self.decoder_channels.append(current_channels)  # Store decoder input channels
-            if i == 0:
-                decoder_block = nn.Sequential(
-                    nn.Conv1d(current_channels, current_channels * 2, 1), 
-                    nn.GLU(dim=1),
-                    CausalConvTranspose1d(current_channels, channels_output, kernel_size, stride)
-                )
-            else:
-                decoder_block = nn.Sequential(
-                    nn.Conv1d(current_channels, current_channels * 2, 1), 
-                    nn.GLU(dim=1),
-                    CausalConvTranspose1d(current_channels, channels_output, kernel_size, stride),
-                    nn.ReLU()
-                )
-                
-            # Add projection layer for skip connection
-            skip_channels = self.encoder_channels[encoder_n_layers - 1 - i]  # Reversed encoder channels
-            if skip_channels != current_channels:
-                self.skip_projections.append(nn.Conv1d(skip_channels, current_channels, kernel_size=1))
-            else:
-                self.skip_projections.append(nn.Identity())  # No projection needed if channels match
+            current_channels = channels_H
             
-            if i == 0:
-                self.decoder.append(decoder_block)
-            else:
-                self.decoder.insert(0, decoder_block)
-            
-            channels_output = current_channels
-            current_channels = current_channels // 2 if i < encoder_n_layers - 1 else 1  # Reduce channels, final layer outputs 1
+            # Double H but keep below max_H
+            channels_H *= 2
+            channels_H = min(channels_H, max_H)
+
+        # Store final encoder output channels for transformer
+        final_encoder_channels = current_channels
         
         # Transformer block with causal attention
-        self.tsfm_conv1 = CausalConv1d(channels_output, tsfm_d_model, kernel_size=1)
+        self.tsfm_conv1 = nn.Conv1d(final_encoder_channels, tsfm_d_model, kernel_size=1)
         self.tsfm_encoder = TransformerEncoder(d_word_vec=tsfm_d_model, 
                                                n_layers=tsfm_n_layers, 
                                                n_head=tsfm_n_head, 
@@ -342,7 +315,36 @@ class CausalCleanUNet(nn.Module):
                                                dropout=0.0, 
                                                n_position=0, 
                                                scale_emb=False)
-        self.tsfm_conv2 = CausalConv1d(tsfm_d_model, channels_output, kernel_size=1)
+        self.tsfm_conv2 = nn.Conv1d(tsfm_d_model, final_encoder_channels, kernel_size=1)
+
+        # Build decoder in reverse order
+        # Start from bottleneck channels and work backwards
+        decoder_input_channels = final_encoder_channels
+        
+        for i in range(encoder_n_layers):
+            layer_idx = encoder_n_layers - 1 - i  # Reverse index
+            
+            # Determine output channels for this decoder layer
+            if i == encoder_n_layers - 1:  # Last decoder layer
+                decoder_output_channels = channels_output
+            else:
+                decoder_output_channels = channels_progression[layer_idx]
+            
+            # Create decoder block
+            decoder_block = nn.Sequential(
+                nn.Conv1d(decoder_input_channels, decoder_input_channels * 2, 1), 
+                nn.GLU(dim=1),
+                CausalConvTranspose1d(decoder_input_channels, decoder_output_channels, kernel_size, stride)
+            )
+            
+            # Add ReLU except for the final layer
+            if i < encoder_n_layers - 1:
+                decoder_block.add_module('relu', nn.ReLU())
+                
+            self.decoder.append(decoder_block)
+            
+            # Update input channels for next decoder layer
+            decoder_input_channels = decoder_output_channels
 
         # Weight scaling initialization
         for layer in self.modules():
@@ -365,9 +367,10 @@ class CausalCleanUNet(nn.Module):
         
         # Encoder
         skip_connections = []
-        for encoder_block in self.encoder:
+        for i, encoder_block in enumerate(self.encoder):
             x = encoder_block(x)
-            skip_connections.append(x)
+            if isinstance(encoder_block, nn.Sequential):  # Skip GroupNorm layers
+                skip_connections.append(x)
         
         skip_connections = skip_connections[::-1]  # Reverse for decoder
 
@@ -383,23 +386,31 @@ class CausalCleanUNet(nn.Module):
         x = x.permute(0, 2, 1)  # (B, L, C) -> (B, C, L)
         x = self.tsfm_conv2(x)
 
-        # Decoder with skip connection length matching
-        for i, (decoder_block, skip_proj) in enumerate(zip(self.decoder, self.skip_projections)):
-            skip_i = skip_connections[i]
-            
-            print(f"Decoder {i}: x.shape={x.shape}, skip_i.shape={skip_i.shape}")
-            
-            # Handle length mismatch
-            min_length = min(x.shape[-1], skip_i.shape[-1])
-            x = x[..., :min_length]
-            skip_i = skip_i[..., :min_length]
-            
-            # Apply projection to skip connection
-            skip_i = skip_proj(skip_i)
-            
-            print(f"  Adding connection {i} after projection to shape {skip_i.shape}")
-            x = x + skip_i  # Add skip connection
-            x = decoder_block(x)
+        # Decoder with robust skip connection handling
+        for i, decoder_block in enumerate(self.decoder):
+            if i < len(skip_connections):
+                skip_i = skip_connections[i]
+                
+                # Handle both channel and length mismatches
+                if skip_i.shape[1] != x.shape[1]:
+                    # Channel mismatch - skip the addition
+                    x = decoder_block(x)
+                else:
+                    # Channels match - fix length then add
+                    min_length = min(x.shape[-1], skip_i.shape[-1])
+                    x_trimmed = x[..., :min_length]
+                    skip_trimmed = skip_i[..., :min_length]
+                    
+                    # Add skip connection
+                    x = x_trimmed + skip_trimmed
+                    x = decoder_block(x)
+            else:
+                # No skip connection available
+                x = decoder_block(x)
+
+        # Final trimming to original length and denormalization
+        x = trim_to_match_length(x, original_length)
+        x = x * std
         
         return x
 
