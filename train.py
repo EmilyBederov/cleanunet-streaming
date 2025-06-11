@@ -23,7 +23,7 @@ from util import rescale, find_max_epoch, print_size
 from util import LinearWarmupCosineDecay
 
 # Import our new causal model
-from causal_cleanunet import CausalCleanUNet, create_hearing_aid_cleanunet
+from causal_cleanunet_backup import CausalCleanUNet, create_hearing_aid_cleanunet
 from hearing_aid_config import HearingAidLoss, hearing_aid_augmentation
 
 

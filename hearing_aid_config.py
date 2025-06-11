@@ -283,7 +283,7 @@ if __name__ == "__main__":
     loss_fn = HearingAidLoss(config)
     
     # Create dummy model and data
-    from causal_cleanunet import create_hearing_aid_cleanunet
+    from causal_cleanunet_backup import create_hearing_aid_cleanunet
     model = create_hearing_aid_cleanunet()
     
     # Test data

@@ -1,5 +1,5 @@
 # Copyright (c) 2022 NVIDIA CORPORATION. 
-#   Licensed under the MIT license.
+# Licensed under the MIT license.
 # Modified for hearing aid applications with causal processing
 
 import numpy as np
@@ -244,12 +244,12 @@ class CausalCleanUNet(nn.Module):
     """ Causal CleanUNet for real-time hearing aid applications """
 
     def __init__(self, channels_input=1, channels_output=1,
-                 channels_H=64, max_H=768,
-                 encoder_n_layers=8, kernel_size=4, stride=2,
-                 tsfm_n_layers=3, 
-                 tsfm_n_head=8,
-                 tsfm_d_model=512, 
-                 tsfm_d_inner=2048,
+                 channels_H=32, max_H=256,
+                 encoder_n_layers=6, kernel_size=3, stride=2,
+                 tsfm_n_layers=2, 
+                 tsfm_n_head=4,
+                 tsfm_d_model=256, 
+                 tsfm_d_inner=512,
                  use_group_norm=True):
         
         super(CausalCleanUNet, self).__init__()
@@ -263,59 +263,72 @@ class CausalCleanUNet(nn.Module):
         self.stride = stride
         self.use_group_norm = use_group_norm
 
-        # Store channel dimensions for skip connections
+        # Store channel dimensions for skip connections and decoder inputs
         self.encoder_channels = []
+        self.decoder_channels = []
+        self.skip_projections = nn.ModuleList()
 
         # Encoder and decoder
         self.encoder = nn.ModuleList()
         self.decoder = nn.ModuleList()
 
         current_channels = channels_input
+        channels_H_temp = channels_H  # Temporary for encoder loop
         
         for i in range(encoder_n_layers):
-            self.encoder_channels.append(channels_H)
+            self.encoder_channels.append(channels_H_temp)
             
             # Use causal convolutions
             encoder_block = nn.Sequential(
-                CausalConv1d(current_channels, channels_H, kernel_size, stride),
+                CausalConv1d(current_channels, channels_H_temp, kernel_size, stride),
                 nn.ReLU(),
-                nn.Conv1d(channels_H, channels_H * 2, 1), 
+                nn.Conv1d(channels_H_temp, channels_H_temp * 2, 1), 
                 nn.GLU(dim=1)
             )
             self.encoder.append(encoder_block)
             
             # Add GroupNorm if requested
             if use_group_norm:
-                self.encoder.append(nn.GroupNorm(num_groups=min(8, channels_H), 
-                                               num_channels=channels_H))
+                self.encoder.append(nn.GroupNorm(num_groups=min(8, channels_H_temp), 
+                                               num_channels=channels_H_temp))
             
-            current_channels = channels_H
-
-            # Decoder blocks (build in reverse order)
+            current_channels = channels_H_temp
+            channels_H_temp *= 2
+            channels_H_temp = min(channels_H_temp, max_H)
+        
+        # Decoder blocks (build in reverse order)
+        channels_H_temp = channels_H  # Reset for decoder
+        current_channels = max_H  # Start from bottleneck
+        for i in range(encoder_n_layers):
+            self.decoder_channels.append(current_channels)  # Store decoder input channels
             if i == 0:
                 decoder_block = nn.Sequential(
-                    nn.Conv1d(channels_H, channels_H * 2, 1), 
+                    nn.Conv1d(current_channels, current_channels * 2, 1), 
                     nn.GLU(dim=1),
-                    CausalConvTranspose1d(channels_H, channels_output, kernel_size, stride)
+                    CausalConvTranspose1d(current_channels, channels_output, kernel_size, stride)
                 )
             else:
                 decoder_block = nn.Sequential(
-                    nn.Conv1d(channels_H, channels_H * 2, 1), 
+                    nn.Conv1d(current_channels, current_channels * 2, 1), 
                     nn.GLU(dim=1),
-                    CausalConvTranspose1d(channels_H, channels_output, kernel_size, stride),
+                    CausalConvTranspose1d(current_channels, channels_output, kernel_size, stride),
                     nn.ReLU()
                 )
                 
+            # Add projection layer for skip connection
+            skip_channels = self.encoder_channels[encoder_n_layers - 1 - i]  # Reversed encoder channels
+            if skip_channels != current_channels:
+                self.skip_projections.append(nn.Conv1d(skip_channels, current_channels, kernel_size=1))
+            else:
+                self.skip_projections.append(nn.Identity())  # No projection needed if channels match
+            
             if i == 0:
                 self.decoder.append(decoder_block)
             else:
                 self.decoder.insert(0, decoder_block)
-                
-            channels_output = channels_H
             
-            # Double H but keep below max_H
-            channels_H *= 2
-            channels_H = min(channels_H, max_H)
+            channels_output = current_channels
+            current_channels = current_channels // 2 if i < encoder_n_layers - 1 else 1  # Reduce channels, final layer outputs 1
         
         # Transformer block with causal attention
         self.tsfm_conv1 = CausalConv1d(channels_output, tsfm_d_model, kernel_size=1)
@@ -371,25 +384,24 @@ class CausalCleanUNet(nn.Module):
         x = self.tsfm_conv2(x)
 
         # Decoder with skip connection length matching
-        for i, decoder_block in enumerate(self.decoder):
+        for i, (decoder_block, skip_proj) in enumerate(zip(self.decoder, self.skip_projections)):
             skip_i = skip_connections[i]
             
             print(f"Decoder {i}: x.shape={x.shape}, skip_i.shape={skip_i.shape}")
             
-            # Handle both channel and length mismatches
-            if skip_i.shape[1] != x.shape[1]:
-                # Channel mismatch - skip the addition
-                print(f"  Skipping connection {i} due to channel mismatch ({skip_i.shape[1]} vs {x.shape[1]})")
-                x = decoder_block(x)
-            else:
-                # Channels match - fix length then add
-                min_length = min(x.shape[-1], skip_i.shape[-1])
-                x_trimmed = x[..., :min_length]
-                skip_trimmed = skip_i[..., :min_length]
-                
-                print(f"  Adding connection {i} after trimming to length {min_length}")
-                x = x_trimmed + skip_trimmed
-                x = decoder_block(x)
+            # Handle length mismatch
+            min_length = min(x.shape[-1], skip_i.shape[-1])
+            x = x[..., :min_length]
+            skip_i = skip_i[..., :min_length]
+            
+            # Apply projection to skip connection
+            skip_i = skip_proj(skip_i)
+            
+            print(f"  Adding connection {i} after projection to shape {skip_i.shape}")
+            x = x + skip_i  # Add skip connection
+            x = decoder_block(x)
+        
+        return x
 
 
 # Example usage and configuration for hearing aids
