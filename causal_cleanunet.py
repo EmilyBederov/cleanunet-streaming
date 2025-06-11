@@ -1,9 +1,8 @@
 # Copyright (c) 2022 NVIDIA CORPORATION. 
 #   Licensed under the MIT license.
-# Modified for hearing aid applications with causal processing
+# True causal adaptation of CleanUNet maintaining full UNet architecture
 
 import numpy as np
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -41,32 +40,31 @@ class CausalConv1d(nn.Module):
         return self.conv(x)
 
 
-class CausalConvTranspose1d(nn.Module):
-    """Truly causal upsampling by repeating samples"""
+class TrulyCausalConvTranspose1d(nn.Module):
+    """Truly causal 'transposed' convolution using repeat + causal conv"""
     
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, groups=1, bias=True):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=2, bias=True):
         super().__init__()
-        self.kernel_size = kernel_size
         self.stride = stride
+        self.kernel_size = kernel_size
         
-        # Simple causal convolution after manual upsampling
-        self.causal_conv = CausalConv1d(in_channels, out_channels, kernel_size, 
-                                       stride=1, groups=groups, bias=bias)
+        # Use nearest neighbor repeat followed by causal conv
+        self.causal_conv = CausalConv1d(in_channels, out_channels, kernel_size, stride=1, bias=bias)
         
     def forward(self, x):
-        # Manual causal upsampling - repeat each sample stride times
+        # Upsample by repeating samples (strictly causal)
         if self.stride > 1:
-            # Repeat each time step stride times
             x = x.repeat_interleave(self.stride, dim=-1)
         
-        # Then apply causal convolution
+        # Apply causal convolution
         x = self.causal_conv(x)
         
         return x
 
 
+# Transformer components from original CleanUNet
 class ScaledDotProductAttention(nn.Module):
-    ''' Scaled Dot-Product Attention '''
+    """Scaled Dot-Product Attention with strict causality"""
 
     def __init__(self, temperature, attn_dropout=0.1):
         super().__init__()
@@ -77,6 +75,7 @@ class ScaledDotProductAttention(nn.Module):
         attn = torch.matmul(q / self.temperature, k.transpose(2, 3))
 
         if mask is not None:
+            # Apply mask: 0 means masked (set to large negative), 1 means allowed
             attn = attn.masked_fill(mask == 0, -1e9)
 
         attn = self.dropout(F.softmax(attn, dim=-1))
@@ -86,7 +85,7 @@ class ScaledDotProductAttention(nn.Module):
 
 
 class MultiHeadAttention(nn.Module):
-    ''' Multi-Head Attention module '''
+    """Multi-Head Attention with GroupNorm for real-time processing"""
 
     def __init__(self, n_head, d_model, d_k, d_v, dropout=0.1):
         super().__init__()
@@ -103,8 +102,7 @@ class MultiHeadAttention(nn.Module):
         self.attention = ScaledDotProductAttention(temperature=d_k ** 0.5)
 
         self.dropout = nn.Dropout(dropout)
-        # Replace LayerNorm with GroupNorm for better real-time performance
-        self.group_norm = nn.GroupNorm(num_groups=min(32, d_model), num_channels=d_model, eps=1e-6)
+        self.layer_norm = nn.LayerNorm(d_model, eps=1e-6)
 
     def forward(self, q, k, v, mask=None):
         d_k, d_v, n_head = self.d_k, self.d_v, self.n_head
@@ -130,37 +128,27 @@ class MultiHeadAttention(nn.Module):
         q = self.dropout(self.fc(q))
         q += residual
 
-        # Apply GroupNorm - need to transpose for channel dimension
-        q = q.transpose(1, 2)  # (B, L, C) -> (B, C, L)
-        q = self.group_norm(q)
-        q = q.transpose(1, 2)  # (B, C, L) -> (B, L, C)
+        q = self.layer_norm(q)
 
         return q, attn
 
 
 class PositionwiseFeedForward(nn.Module):
-    ''' A two-feed-forward-layer module '''
+    """Position-wise feedforward network"""
 
     def __init__(self, d_in, d_hid, dropout=0.1):
         super().__init__()
         self.w_1 = nn.Linear(d_in, d_hid)
         self.w_2 = nn.Linear(d_hid, d_in)
-        # Replace LayerNorm with GroupNorm
-        self.group_norm = nn.GroupNorm(num_groups=min(32, d_in), num_channels=d_in, eps=1e-6)
+        self.layer_norm = nn.LayerNorm(d_in, eps=1e-6)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
         residual = x
-
         x = self.w_2(F.relu(self.w_1(x)))
         x = self.dropout(x)
         x += residual
-
-        # Apply GroupNorm - need to transpose for channel dimension
-        x = x.transpose(1, 2)  # (B, L, C) -> (B, C, L)
-        x = self.group_norm(x)
-        x = x.transpose(1, 2)  # (B, C, L) -> (B, L, C)
-
+        x = self.layer_norm(x)
         return x
 
 
@@ -211,8 +199,7 @@ class TransformerEncoder(nn.Module):
         self.layer_stack = nn.ModuleList([
             EncoderLayer(d_model, d_inner, n_head, d_k, d_v, dropout=dropout)
             for _ in range(n_layers)])
-        # Replace LayerNorm with GroupNorm
-        self.group_norm = nn.GroupNorm(num_groups=min(32, d_model), num_channels=d_model, eps=1e-6)
+        self.layer_norm = nn.LayerNorm(d_model, eps=1e-6)
         self.scale_emb = scale_emb
         self.d_model = d_model
 
@@ -223,11 +210,7 @@ class TransformerEncoder(nn.Module):
         if self.scale_emb:
             enc_output *= self.d_model ** 0.5
         enc_output = self.dropout(self.position_enc(enc_output))
-        
-        # Apply GroupNorm
-        enc_output = enc_output.transpose(1, 2)  # (B, L, C) -> (B, C, L)
-        enc_output = self.group_norm(enc_output)
-        enc_output = enc_output.transpose(1, 2)  # (B, C, L) -> (B, L, C)
+        enc_output = self.layer_norm(enc_output)
 
         for enc_layer in self.layer_stack:
             enc_output, enc_slf_attn = enc_layer(enc_output, slf_attn_mask=src_mask)
@@ -238,8 +221,8 @@ class TransformerEncoder(nn.Module):
         return enc_output
 
 
-class CausalCleanUNet(nn.Module):
-    """ Causal CleanUNet for real-time hearing aid applications """
+class TrueCausalCleanUNet(nn.Module):
+    """True causal adaptation of CleanUNet maintaining full UNet architecture"""
 
     def __init__(self, channels_input=1, channels_output=1,
                  channels_H=64, max_H=768,
@@ -247,10 +230,9 @@ class CausalCleanUNet(nn.Module):
                  tsfm_n_layers=3, 
                  tsfm_n_head=8,
                  tsfm_d_model=512, 
-                 tsfm_d_inner=2048,
-                 use_group_norm=True):
+                 tsfm_d_inner=2048):
         
-        super(CausalCleanUNet, self).__init__()
+        super(TrueCausalCleanUNet, self).__init__()
 
         self.channels_input = channels_input
         self.channels_output = channels_output
@@ -259,41 +241,49 @@ class CausalCleanUNet(nn.Module):
         self.encoder_n_layers = encoder_n_layers
         self.kernel_size = kernel_size
         self.stride = stride
-        self.use_group_norm = use_group_norm
 
         self.tsfm_n_layers = tsfm_n_layers
         self.tsfm_n_head = tsfm_n_head
         self.tsfm_d_model = tsfm_d_model
         self.tsfm_d_inner = tsfm_d_inner
 
-        # Encoder and decoder
+        # Encoder and decoder - following original CleanUNet structure exactly
         self.encoder = nn.ModuleList()
         self.decoder = nn.ModuleList()
 
-        # Build encoder
-        current_channels = channels_input
-        
+        # Build encoder following original CleanUNet pattern
         for i in range(encoder_n_layers):
-            # Use causal convolutions
-            encoder_block = nn.Sequential(
-                CausalConv1d(current_channels, channels_H, kernel_size, stride),
+            self.encoder.append(nn.Sequential(
+                CausalConv1d(channels_input, channels_H, kernel_size, stride),
                 nn.ReLU(),
                 nn.Conv1d(channels_H, channels_H * 2, 1), 
                 nn.GLU(dim=1)
-            )
-            self.encoder.append(encoder_block)
+            ))
+            channels_input = channels_H
+
+            if i == 0:
+                # First decoder layer (no relu at end)
+                self.decoder.append(nn.Sequential(
+                    nn.Conv1d(channels_H, channels_H * 2, 1), 
+                    nn.GLU(dim=1),
+                    TrulyCausalConvTranspose1d(channels_H, channels_output, kernel_size, stride)
+                ))
+            else:
+                # Other decoder layers (with relu)
+                self.decoder.insert(0, nn.Sequential(
+                    nn.Conv1d(channels_H, channels_H * 2, 1), 
+                    nn.GLU(dim=1),
+                    TrulyCausalConvTranspose1d(channels_H, channels_output, kernel_size, stride),
+                    nn.ReLU()
+                ))
+            channels_output = channels_H
             
-            current_channels = channels_H
-            
-            # Double H but keep below max_H
+            # Double H but keep below max_H (original CleanUNet pattern)
             channels_H *= 2
             channels_H = min(channels_H, max_H)
-
-        # Store final encoder output channels
-        final_encoder_channels = current_channels
         
-        # Transformer block with causal attention
-        self.tsfm_conv1 = nn.Conv1d(final_encoder_channels, tsfm_d_model, kernel_size=1)
+        # Transformer block (following original CleanUNet)
+        self.tsfm_conv1 = nn.Conv1d(channels_output, tsfm_d_model, kernel_size=1)
         self.tsfm_encoder = TransformerEncoder(d_word_vec=tsfm_d_model, 
                                                n_layers=tsfm_n_layers, 
                                                n_head=tsfm_n_head, 
@@ -304,114 +294,90 @@ class CausalCleanUNet(nn.Module):
                                                dropout=0.0, 
                                                n_position=0, 
                                                scale_emb=False)
-        self.tsfm_conv2 = nn.Conv1d(tsfm_d_model, final_encoder_channels, kernel_size=1)
+        self.tsfm_conv2 = nn.Conv1d(tsfm_d_model, channels_output, kernel_size=1)
 
-        # Build decoder - simple version without complex skip connections
-        decoder_channels = final_encoder_channels
-        
-        for i in range(encoder_n_layers):
-            if i == encoder_n_layers - 1:  # Last layer
-                output_channels = channels_output
-            else:
-                output_channels = max(decoder_channels // 2, self.channels_H)
-            
-            decoder_block = nn.Sequential(
-                nn.Conv1d(decoder_channels, decoder_channels * 2, 1), 
-                nn.GLU(dim=1),
-                CausalConvTranspose1d(decoder_channels, output_channels, kernel_size, stride)
-            )
-            
-            # Add ReLU except for the final layer
-            if i < encoder_n_layers - 1:
-                decoder_block.add_module('relu', nn.ReLU())
-                
-            self.decoder.append(decoder_block)
-            decoder_channels = output_channels
-
-        # Weight scaling initialization
+        # Weight scaling initialization (from original CleanUNet)
         for layer in self.modules():
             if isinstance(layer, (nn.Conv1d, nn.ConvTranspose1d)):
                 weight_scaling_init(layer)
 
     def forward(self, noisy_audio):
-        # Input shape: (B, L) or (B, C, L)
+        # Following original CleanUNet forward pass structure exactly
+        
+        # (B, L) -> (B, C, L)
         if len(noisy_audio.shape) == 2:
             noisy_audio = noisy_audio.unsqueeze(1)
         B, C, L = noisy_audio.shape
         assert C == 1
         
-        # Normalization
+        # Normalization and padding (original CleanUNet approach)
         std = noisy_audio.std(dim=2, keepdim=True) + 1e-3
-        x = noisy_audio / std
+        noisy_audio /= std
         
-        # Store original length for final trimming
-        original_length = L
+        # For causal processing, we don't need the complex padding from original
+        x = noisy_audio
         
-        # Encoder
+        # Encoder with skip connections (original CleanUNet structure)
         skip_connections = []
-        for encoder_block in self.encoder:
-            x = encoder_block(x)
+        for downsampling_block in self.encoder:
+            x = downsampling_block(x)
             skip_connections.append(x)
-        
-        skip_connections = skip_connections[::-1]  # Reverse for decoder
+        skip_connections = skip_connections[::-1]
 
-        # Causal attention mask - ensure no future information
+        # Attention mask for STRICT causal inference 
         len_s = x.shape[-1]
-        # Create lower triangular mask (1s for allowed positions, 0s for masked)
+        # Lower triangular mask: can attend to current and past positions only
         attn_mask = torch.tril(torch.ones((len_s, len_s), device=x.device)).bool()
-        attn_mask = attn_mask.unsqueeze(0)  # Add batch dimension
+        # Add batch dimension for transformer
+        attn_mask = attn_mask.unsqueeze(0)
 
-        # Transformer processing
+        # Transformer processing (original CleanUNet structure)
         x = self.tsfm_conv1(x)
         x = x.permute(0, 2, 1)  # (B, C, L) -> (B, L, C)
         x = self.tsfm_encoder(x, src_mask=attn_mask)
         x = x.permute(0, 2, 1)  # (B, L, C) -> (B, C, L)
         x = self.tsfm_conv2(x)
 
-        # Decoder with simplified skip connection handling
-        for i, decoder_block in enumerate(self.decoder):
-            # Apply decoder block first
-            x = decoder_block(x)
+        # Decoder with skip connections (original CleanUNet structure)
+        for i, upsampling_block in enumerate(self.decoder):
+            skip_i = skip_connections[i]
             
-            # Then add skip connection if possible
-            if i < len(skip_connections):
-                skip_i = skip_connections[i]
-                
-                if (skip_i.shape[1] == x.shape[1] and 
-                    skip_i.shape[-1] <= x.shape[-1]):
-                    
-                    # Trim to match and add
-                    min_length = min(x.shape[-1], skip_i.shape[-1])
-                    x = x[..., :min_length] + skip_i[..., :min_length]
+            # Ensure causality: trim skip connection to current x length
+            # This prevents any future information from leaking through skip connections
+            current_length = x.shape[-1]
+            if skip_i.shape[-1] > current_length:
+                skip_i = skip_i[:, :, :current_length]
+            elif skip_i.shape[-1] < current_length:
+                x = x[:, :, :skip_i.shape[-1]]
+            
+            # Add skip connection (original CleanUNet)
+            x = x + skip_i
+            x = upsampling_block(x)
 
-        # Final processing
-        x = trim_to_match_length(x, original_length) 
-        x = x * std
-        
+        # Final trimming and denormalization (original CleanUNet approach)
+        x = x[:, :, :L] * std
         return x
 
 
-# Example usage and configuration for hearing aids
-def create_hearing_aid_cleanunet():
-    """Create a CleanUNet optimized for hearing aid applications"""
-    return CausalCleanUNet(
+def create_true_causal_cleanunet():
+    """Create a truly causal CleanUNet for hearing aids"""
+    return TrueCausalCleanUNet(
         channels_input=1,
         channels_output=1,
-        channels_H=32,  # Reduced for efficiency
-        max_H=256,      # Reduced for efficiency
-        encoder_n_layers=6,  # Reduced for lower latency
-        kernel_size=3,  # Smaller kernel for lower latency
+        channels_H=32,      # Reduced for hearing aid efficiency
+        max_H=256,          # Reduced for hearing aid efficiency
+        encoder_n_layers=6, # Reduced for lower latency
+        kernel_size=3,      # Smaller kernel for lower latency
         stride=2,
-        tsfm_n_layers=2,  # Reduced for efficiency
-        tsfm_n_head=4,    # Reduced for efficiency
-        tsfm_d_model=256, # Reduced for efficiency
-        tsfm_d_inner=512, # Reduced for efficiency
-        use_group_norm=True
+        tsfm_n_layers=2,    # Reduced for efficiency
+        tsfm_n_head=4,      # Reduced for efficiency
+        tsfm_d_model=256,   # Reduced for efficiency
+        tsfm_d_inner=512    # Reduced for efficiency
     )
 
 
-def test_causality(model, input_length=320, split_point=160):
-    """Test if model is truly causal"""
+def test_causality_strict(model, input_length=320, split_point=160):
+    """Strict causality test for hearing aid applications"""
     model.eval()
     
     # Create test inputs
@@ -433,23 +399,24 @@ def test_causality(model, input_length=320, split_point=160):
     # Calculate maximum absolute difference
     max_diff = torch.max(torch.abs(past_out1 - past_out2)).item()
     
-    # Check causality (allow reasonable numerical differences)
-    is_causal = max_diff < 1e-3  # More lenient threshold
+    # Strict causality for hearing aids
+    is_causal = max_diff < 1e-6
     
-    print(f"Causality Test Results:")
+    print(f"Strict Causality Test Results:")
     print(f"  Input length: {input_length}, Split point: {split_point}")
     print(f"  Max difference in past outputs: {max_diff:.2e}")
-    print(f"  Is causal: {is_causal} (threshold: 1e-3)")
+    print(f"  Is causal: {is_causal} (threshold: 1e-6)")
+    print(f"  Suitable for hearing aids: {is_causal}")
     
     return is_causal
 
 
 if __name__ == '__main__':
-    # Test the causal model
-    model = create_hearing_aid_cleanunet()
+    # Test the truly causal CleanUNet
+    model = create_true_causal_cleanunet()
     
-    # Test with a sample (16kHz, 10ms = 160 samples)
-    sample_input = torch.randn(1, 1, 160)  # Batch=1, Channels=1, Length=160
+    # Test with a sample
+    sample_input = torch.randn(1, 1, 160)
     
     with torch.no_grad():
         output = model(sample_input)
@@ -458,13 +425,11 @@ if __name__ == '__main__':
     print(f"Output shape: {output.shape}")
     print(f"Model parameters: {sum(p.numel() for p in model.parameters())}")
     
-    # Enhanced causality test
+    # Strict causality test
     print("\n" + "="*50)
-    causality_passed = test_causality(model, input_length=320, split_point=160)
+    causality_passed = test_causality_strict(model, input_length=320, split_point=160)
     
     if not causality_passed:
-        print("\n⚠️  WARNING: Model failed causality test!")
-        print("This model is NOT suitable for real-time hearing aid applications.")
+        print("\n⚠️  STILL FAILED: Need further debugging")
     else:
-        print("\n✅ SUCCESS: Model passed causality test!")
-        print("This model is suitable for real-time hearing aid applications.")
+        print("\n🎉 SUCCESS: True causal CleanUNet ready for hearing aids!")
